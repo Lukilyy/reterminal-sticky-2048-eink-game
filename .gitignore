@@ -1,0 +1,21 @@
+# Internal documents
+codex/
+
+# ESP-IDF build output
+build/
+build-*/
+
+# ESP-IDF generated files
+sdkconfig
+sdkconfig.old
+managed_components/
+dependencies.lock
+
+# IDE
+.vscode/
+
+# Cache
+.cache/
+
+# Executables
+*.exe
