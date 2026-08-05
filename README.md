@@ -9,7 +9,9 @@ integration.
 The game uses the native 1-bit E-paper framebuffer and ESP-IDF directly,
 without LVGL, networking, cloud services, or filesystem dependencies.
 
-![reTerminal Sticky running 2048](images/2048.jpg)
+<p align="center">
+  <img src="images/2048.jpg" alt="reTerminal Sticky running 2048" width="50%">
+</p>
 
 ## Features
 
