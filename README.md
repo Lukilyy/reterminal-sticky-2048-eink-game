@@ -69,13 +69,13 @@ Project configuration is provided through `sdkconfig.defaults`. The generated
 
 ### Single-file firmware package
 
-Download `reterminal-sticky-2048-v2.0.0-merged.bin` from the GitHub release.
+Download `sticky-2048-v2.0.0.bin` from the GitHub release.
 The merged image includes the bootloader, partition table, and application.
 
 Flash this merged file at address **0x0** on an ESP32-S3 Sticky:
 
 ```bash
-python -m esptool --chip esp32s3 -p PORT write_flash --flash_mode dio --flash_freq 80m --flash_size 32MB 0x0 reterminal-sticky-2048-v2.0.0-merged.bin
+python -m esptool --chip esp32s3 -p PORT write_flash --flash_mode dio --flash_freq 80m --flash_size 32MB 0x0 sticky-2048-v2.0.0.bin
 ```
 
 The package uses a 32 MB flash configuration; the file itself contains only
