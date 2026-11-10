@@ -2,9 +2,12 @@
 
 #include <cstring>
 
+#include "driver/gpio.h"
 #include "esp_err.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "pin_config.h"
 
 namespace {
@@ -13,13 +16,65 @@ constexpr const char *kTag = "sticky_display";
 
 bool StickyDisplay::init()
 {
+    // Match Dashboard board_init() and the official InitializeSpi(): power
+    // MicroSD but keep CS high while probing the panel on the shared SPI2 bus.
+    gpio_config_t sd_config = {};
+    sd_config.pin_bit_mask = (1ULL << PIN_SD_CS) | (1ULL << PIN_SD_EN);
+    sd_config.mode = GPIO_MODE_OUTPUT;
+    esp_err_t err = gpio_config(&sd_config);
+    if (err == ESP_OK) {
+        err = gpio_set_level(static_cast<gpio_num_t>(PIN_SD_CS), 1);
+    }
+    if (err == ESP_OK) {
+        err = gpio_set_level(static_cast<gpio_num_t>(PIN_SD_EN), 1);
+    }
+    if (err != ESP_OK) {
+        ESP_LOGE(kTag, "MicroSD isolation failed: %s", esp_err_to_name(err));
+        return false;
+    }
+
+    // Match the board-level setup in the reference firmware: power the panel
+    // with RESET, DC and CS idle high before attempting the controller probe.
+    gpio_config_t panel_gpio_config = {};
+    panel_gpio_config.pin_bit_mask = (1ULL << PIN_EPD_EN) | (1ULL << PIN_EPD_RST) |
+                                    (1ULL << PIN_EPD_DC) | (1ULL << PIN_EPD_CS);
+    panel_gpio_config.mode = GPIO_MODE_OUTPUT;
+    err = gpio_config(&panel_gpio_config);
+    if (err == ESP_OK) {
+        const gpio_num_t idle_high_pins[] = {
+            static_cast<gpio_num_t>(PIN_EPD_RST),
+            static_cast<gpio_num_t>(PIN_EPD_DC),
+            static_cast<gpio_num_t>(PIN_EPD_CS),
+            static_cast<gpio_num_t>(PIN_EPD_EN),
+        };
+        for (gpio_num_t pin : idle_high_pins) {
+            err = gpio_set_level(pin, 1);
+            if (err != ESP_OK) {
+                break;
+            }
+        }
+    }
+    if (err != ESP_OK) {
+        ESP_LOGE(kTag, "Panel power setup failed: %s", esp_err_to_name(err));
+        return false;
+    }
+    // The Dashboard reference allows the panel rail to settle before SPI/ID reads.
+    vTaskDelay(pdMS_TO_TICKS(100));
+
     spi_bus_config_t bus_config = {};
     bus_config.mosi_io_num = PIN_EPD_MOSI;
     bus_config.miso_io_num = PIN_EPD_MISO;
     bus_config.sclk_io_num = PIN_EPD_CLK;
+    // Unused SPI pins must not default to GPIO0 (sensor I2C SCL).
+    bus_config.quadwp_io_num = -1;
+    bus_config.quadhd_io_num = -1;
+    bus_config.data4_io_num = -1;
+    bus_config.data5_io_num = -1;
+    bus_config.data6_io_num = -1;
+    bus_config.data7_io_num = -1;
     bus_config.max_transfer_sz = kBufferSize;
 
-    esp_err_t err = spi_bus_initialize(SPI2_HOST, &bus_config, SPI_DMA_CH_AUTO);
+    err = spi_bus_initialize(SPI2_HOST, &bus_config, SPI_DMA_CH_AUTO);
     if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
         ESP_LOGE(kTag, "SPI bus init failed: %s", esp_err_to_name(err));
         return false;
@@ -29,6 +84,8 @@ bool StickyDisplay::init()
     device_config.clock_speed_hz = 10 * 1000 * 1000;
     device_config.mode = 0;
     device_config.spics_io_num = PIN_EPD_CS;
+    // Official SSD-family probe reads back over the bidirectional MOSI line.
+    device_config.flags = SPI_DEVICE_HALFDUPLEX | SPI_DEVICE_3WIRE;
     device_config.queue_size = 1;
 
     err = spi_bus_add_device(SPI2_HOST, &device_config, &spi_device_);
@@ -39,22 +96,38 @@ bool StickyDisplay::init()
 
     seeed_epaper_panel_config_t panel_config = {};
     panel_config.spi_handle = spi_device_;
+    panel_config.pin_cs = static_cast<gpio_num_t>(PIN_EPD_CS);
     panel_config.pin_dc = static_cast<gpio_num_t>(PIN_EPD_DC);
     panel_config.pin_rst = static_cast<gpio_num_t>(PIN_EPD_RST);
     panel_config.pin_busy = static_cast<gpio_num_t>(PIN_EPD_BUSY);
-    panel_config.pin_enable = static_cast<gpio_num_t>(PIN_EPD_EN);
-    panel_config.busy_timeout_ms = 10000;
-    panel_config.reset_low_ms = 10;
+    // Power is already enabled and settled above, as in the Dashboard adapter.
+    panel_config.pin_enable = GPIO_NUM_NC;
+    // The driver applies the final BUSY polarity and reset timing after probing.
+    panel_config.busy_timeout_ms = 30000;
+    panel_config.reset_low_ms = 20;
     panel_config.reset_high_ms = 10;
-    panel_config.busy_level = 1;
+    panel_config.busy_level = 0;
+    panel_config.busy_level_valid = true;
     panel_config.enable_level = 1;
+    panel_config.enable_level_valid = true;
+    panel_config.manual_cs = false;
     panel_config.mirror_x = true;
 
+    // SSD-family entry: ID 0x07 selects SSD2677; otherwise use SSD1677.
     err = seeed_epaper_new_panel(SEEED_EPAPER_PANEL_SSD1677, &panel_config, &panel_);
     if (err != ESP_OK) {
         ESP_LOGE(kTag, "Panel init failed: %s", esp_err_to_name(err));
         return false;
     }
+
+    seeed_epaper_panel_model_t detected_model;
+    err = seeed_epaper_panel_get_model(panel_, &detected_model);
+    if (err != ESP_OK) {
+        ESP_LOGE(kTag, "Panel model read failed: %s", esp_err_to_name(err));
+        return false;
+    }
+    ESP_LOGI(kTag, "Detected e-paper controller: %s",
+             detected_model == SEEED_EPAPER_PANEL_SSD2677 ? "SSD2677" : "SSD1677");
 
     framebuffer_ = static_cast<uint8_t *>(
         heap_caps_malloc(kBufferSize, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));

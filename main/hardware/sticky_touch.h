@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <atomic>
 
 #include "driver/i2c_master.h"
 #include "freertos/FreeRTOS.h"
@@ -25,6 +26,8 @@ struct TouchEvent {
 class StickyTouch {
 public:
     bool init();
+    // Finish any in-flight I2C read and stop polling before cutting touch power.
+    void stop();
     TouchEvent poll();
 
 private:
@@ -40,6 +43,9 @@ private:
     i2c_master_bus_handle_t i2c_bus_ = nullptr;
     GT911 controller_;
     QueueHandle_t event_queue_ = nullptr;
+    bool task_started_ = false;
+    std::atomic<bool> stop_requested_{false};
+    std::atomic<bool> task_stopped_{false};
     bool touching_ = false;
     Point start_ = {};
     Point last_ = {};

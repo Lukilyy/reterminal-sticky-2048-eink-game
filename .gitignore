@@ -1,5 +1,10 @@
 # Internal documents
 codex/
+.codex/
+release/
+tools/
+RELEASE_NOTES.md
+__pycache__/
 
 # ESP-IDF build output
 build/

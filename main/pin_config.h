@@ -32,7 +32,7 @@
 #define PIN_TOUCH_INT       21
 #define PIN_TOUCH_RST       41
 
-// E-paper SSD1677 (SPI)
+// E-paper SSD1677 / SSD2677 (SPI, automatically detected)
 #define PIN_EPD_MOSI        14
 #define PIN_EPD_CLK         13
 #define PIN_EPD_MISO        12
@@ -41,3 +41,7 @@
 #define PIN_EPD_RST         17
 #define PIN_EPD_BUSY        18
 #define PIN_EPD_EN          47
+
+// MicroSD shares SPI2; keep it powered and deselected for panel ID probing.
+#define PIN_SD_CS           8
+#define PIN_SD_EN           10

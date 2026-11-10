@@ -1,9 +1,11 @@
 #include <cstdint>
+#include <cstdio>
 
 #include "driver/gpio.h"
 #include "esp_log.h"
 #include "esp_random.h"
 #include "esp_rom_sys.h"
+#include "esp_sleep.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -94,6 +96,29 @@ bool to_move_direction(TouchEventType event, MoveDirection &move)
 
 void power_on_hold()
 {
+    const bool woke_from_deep_sleep =
+        esp_sleep_get_wakeup_cause() != ESP_SLEEP_WAKEUP_UNDEFINED;
+    if (woke_from_deep_sleep) {
+        // Preload the retained power latch before releasing GPIO holds.
+        ESP_ERROR_CHECK(gpio_set_direction(static_cast<gpio_num_t>(PIN_POWER_HOLD), GPIO_MODE_OUTPUT));
+        ESP_ERROR_CHECK(gpio_set_level(static_cast<gpio_num_t>(PIN_POWER_HOLD), 1));
+        ESP_ERROR_CHECK(gpio_set_direction(static_cast<gpio_num_t>(PIN_POWER_LOCK), GPIO_MODE_OUTPUT));
+        ESP_ERROR_CHECK(gpio_set_level(static_cast<gpio_num_t>(PIN_POWER_LOCK), 1));
+    }
+    gpio_deep_sleep_hold_dis();
+    constexpr int held_pins[] = {
+        PIN_POWER_HOLD, PIN_POWER_LOCK, PIN_POWER_BTN,
+        PIN_EPD_EN, PIN_TOUCH_EN, PIN_TOUCH_RST, PIN_SD_EN, PIN_BUZZER,
+    };
+    for (int pin : held_pins) {
+        ESP_ERROR_CHECK(gpio_hold_dis(static_cast<gpio_num_t>(pin)));
+    }
+    if (woke_from_deep_sleep) {
+        ESP_LOGI(kTag, "Resuming from deep sleep, wake cause=%d",
+                 static_cast<int>(esp_sleep_get_wakeup_cause()));
+        return;
+    }
+
     gpio_config_t config = {};
     config.pin_bit_mask = (1ULL << PIN_POWER_HOLD) | (1ULL << PIN_POWER_LOCK);
     config.mode = GPIO_MODE_OUTPUT;
@@ -107,15 +132,48 @@ void power_on_hold()
     gpio_set_level(static_cast<gpio_num_t>(PIN_POWER_LOCK), 0);
 }
 
-void power_off()
+void hold_sleep_output(int pin, int level)
 {
-    gpio_hold_dis(static_cast<gpio_num_t>(PIN_POWER_HOLD));
-    gpio_set_level(static_cast<gpio_num_t>(PIN_POWER_HOLD), 0);
-    gpio_set_level(static_cast<gpio_num_t>(PIN_POWER_LOCK), 0);
-    esp_rom_delay_us(10);
-    gpio_set_level(static_cast<gpio_num_t>(PIN_POWER_LOCK), 1);
-    esp_rom_delay_us(10);
-    gpio_set_level(static_cast<gpio_num_t>(PIN_POWER_LOCK), 0);
+    const gpio_num_t gpio = static_cast<gpio_num_t>(pin);
+    ESP_ERROR_CHECK(gpio_hold_dis(gpio));
+    ESP_ERROR_CHECK(gpio_set_direction(gpio, GPIO_MODE_OUTPUT));
+    ESP_ERROR_CHECK(gpio_set_level(gpio, level));
+    ESP_ERROR_CHECK(gpio_hold_en(gpio));
+}
+
+[[noreturn]] void enter_deep_sleep()
+{
+    const gpio_num_t wake_pin = static_cast<gpio_num_t>(PIN_POWER_BTN);
+    // Require a stable release so the long press cannot immediately wake us.
+    do {
+        while (gpio_get_level(wake_pin) == 0) {
+            vTaskDelay(pdMS_TO_TICKS(20));
+        }
+        vTaskDelay(pdMS_TO_TICKS(60));
+    } while (gpio_get_level(wake_pin) == 0);
+
+    // Follow Dashboard's retained power latch and peripheral shutdown levels.
+    hold_sleep_output(PIN_POWER_HOLD, 1);
+    hold_sleep_output(PIN_POWER_LOCK, 1);
+    hold_sleep_output(PIN_EPD_EN, 0);
+    hold_sleep_output(PIN_TOUCH_EN, 0);
+    hold_sleep_output(PIN_TOUCH_RST, 0);
+    hold_sleep_output(PIN_SD_EN, 0);
+    hold_sleep_output(PIN_BUZZER, 0);
+
+    ESP_ERROR_CHECK(gpio_hold_dis(wake_pin));
+    ESP_ERROR_CHECK(gpio_set_direction(wake_pin, GPIO_MODE_INPUT));
+    ESP_ERROR_CHECK(gpio_pullup_en(wake_pin));
+    ESP_ERROR_CHECK(gpio_pulldown_dis(wake_pin));
+    ESP_ERROR_CHECK(gpio_hold_en(wake_pin));
+    ESP_ERROR_CHECK(esp_sleep_enable_ext1_wakeup_io(
+        1ULL << PIN_POWER_BTN, ESP_EXT1_WAKEUP_ANY_LOW));
+    gpio_deep_sleep_hold_en();
+
+    ESP_LOGI(kTag, "Entering deep sleep; press AI button (GPIO%d) to wake", PIN_POWER_BTN);
+    std::fflush(stdout);
+    vTaskDelay(pdMS_TO_TICKS(50));
+    esp_deep_sleep_start();
 }
 } // namespace
 
@@ -206,15 +264,8 @@ extern "C" void app_main(void)
                     display.refresh_full();
                 }
 
-                while (ai_button.is_pressed()) {
-                    vTaskDelay(pdMS_TO_TICKS(20));
-                }
-                vTaskDelay(pdMS_TO_TICKS(100));
-                power_off();
-
-                while (true) {
-                    vTaskDelay(portMAX_DELAY);
-                }
+                touch.stop();
+                enter_deep_sleep();
             }
         }
 

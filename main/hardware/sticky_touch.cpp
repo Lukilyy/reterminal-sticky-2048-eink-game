@@ -133,7 +133,20 @@ bool StickyTouch::init()
         event_queue_ = nullptr;
         return false;
     }
+    task_started_ = true;
     return true;
+}
+
+void StickyTouch::stop()
+{
+    if (!task_started_) {
+        return;
+    }
+    stop_requested_.store(true);
+    while (!task_stopped_.load()) {
+        vTaskDelay(pdMS_TO_TICKS(1));
+    }
+    task_started_ = false;
 }
 
 TouchEvent StickyTouch::poll()
@@ -153,13 +166,16 @@ void StickyTouch::touch_task_entry(void *context)
 void StickyTouch::touch_task()
 {
     TickType_t next_poll = xTaskGetTickCount();
-    while (true) {
+    while (!stop_requested_.load()) {
         const TouchEvent event = read_touch();
         if (event.type != TouchEventType::None) {
             xQueueOverwrite(event_queue_, &event);
         }
         vTaskDelayUntil(&next_poll, kPollInterval);
     }
+    // No controller accesses occur after this acknowledgement.
+    task_stopped_.store(true);
+    vTaskDelete(nullptr);
 }
 
 TouchEvent StickyTouch::read_touch()

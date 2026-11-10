@@ -15,14 +15,25 @@ without LVGL, networking, cloud services, or filesystem dependencies.
 
 ## Features
 
+### Version 2.0.0
+
+- One firmware supports automatic SSD1677 / SSD2677 controller detection.
+- Shared-SPI startup supports display operation with a MicroSD card inserted.
+- The AI button saves the game and enters Deep Sleep, then wakes and restores
+  the game on the next press, including while USB power is connected.
+- Touch polling stops before peripheral power is disabled, preventing I2C
+  errors during sleep entry.
+
+Both controller revisions were tested on physical devices by the maintainer.
+
 - Native ESP-IDF implementation
-- Portrait 480 × 800 UI on the SSD1677 E-Ink display
+- Portrait 480 × 800 UI with automatic SSD1677 / SSD2677 E-Ink controller detection
 - 2048 game logic implemented in C++
 - GT911 touch swipe control with an independent polling task
 - Partial refresh during gameplay with periodic full refresh cleanup
 - AI button support:
   - Short press: start a new game
-  - Long press: save the current game state and power off
+  - Long press: save the current game state and enter Deep Sleep
 - BQ27220 battery percentage display
 - External power detection
 - NVS persistence for:
@@ -56,12 +67,30 @@ Replace `PORT` with the serial port of your reTerminal Sticky.
 Project configuration is provided through `sdkconfig.defaults`. The generated
 `sdkconfig` file is intentionally excluded from version control.
 
+### Single-file firmware package
+
+Download `reterminal-sticky-2048-v2.0.0-merged.bin` from the GitHub release.
+The merged image includes the bootloader, partition table, and application.
+
+Flash this merged file at address **0x0** on an ESP32-S3 Sticky:
+
+```bash
+python -m esptool --chip esp32s3 -p PORT write_flash --flash_mode dio --flash_freq 80m --flash_size 32MB 0x0 reterminal-sticky-2048-v2.0.0-merged.bin
+```
+
+The package uses a 32 MB flash configuration; the file itself contains only
+the required images and padding. It does not contain personal NVS game saves.
+
 ## Controls
 
 - Swipe up, down, left, or right to move tiles.
 - Tap `NEW GAME` to restart the game.
 - Short-press the AI button to start a new game.
-- Long-press the AI button to save the current game and power off.
+- Long-press the AI button to save the current game and enter Deep Sleep.
+- Release the button after the sleep page appears, then press it again to wake
+  and restore the saved game. This works with USB connected or on battery power.
+  Wake restarts the application; startup releases the retained GPIO holds before
+  initializing the display, touch panel, and SD power rail.
 
 ## Project Structure
 
@@ -88,12 +117,37 @@ components/
 | AI / Power Button | 4 |
 | External Power Detect | 9 |
 | E-Paper SPI | 13–18 |
+| E-Paper MISO | 12 |
+| MicroSD CS / Enable | 8, 10 |
 | GT911 I2C | 2, 3 |
 | GT911 Enable / Interrupt / Reset | 42, 21, 41 |
 | BQ27220 I2C | 0, 1 |
 | Charger Enable | 39 |
 | Buzzer PWM | 48 |
 | Power Hold / Lock | 45, 46 |
+
+## Display Compatibility
+
+The bundled `seeed_epaper` component follows the official
+Seeed-reTerminal-Sticky-Firmware implementation. It reads the controller ID
+with command `0x70`: `0x07` selects SSD2677, and other values select SSD1677.
+The driver applies the matching BUSY polarity, reset timing, and refresh sequence.
+Startup logs report `Detected e-paper controller: SSD1677` or `SSD2677`.
+Before probing, display power is enabled with RESET, DC, and CS idle high,
+followed by a 100 ms power settling delay, matching the reference Demo startup.
+The `panel probe` log also reports the raw controller ID for troubleshooting.
+
+MicroSD shares SPI2 with the display. Since this game does not use SD storage,
+startup holds MicroSD CS (GPIO8) high and enables its power rail (GPIO10 high)
+before display initialization, matching Dashboard `board_init()` and the official
+firmware's shared-SPI startup. The card is not mounted or used by the game.
+Unused SPI data pins are explicitly disabled to
+avoid taking GPIO0 away from the sensor I2C bus. Game saves continue to use NVS.
+
+To check on hardware, boot each screen revision with and without a MicroSD card
+inserted, confirm the detected controller in the serial log, and check the initial
+full refresh, swipe-triggered partial refresh, and periodic full refresh cleanup.
+Also confirm touch input and battery readings still work.
 
 ## Scope
 
